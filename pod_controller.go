@@ -44,6 +44,7 @@ type PodController struct {
 	lockPodParallelism                int
 	deletePodChan                     chan *corev1.Pod
 	deletePodParallelism              int
+	providers                         *providerSets
 }
 
 // PodControllerConfig is the configuration for the PodController
@@ -61,7 +62,7 @@ type PodControllerConfig struct {
 }
 
 // NewPodController creates a new fake pods controller
-func NewPodController(conf PodControllerConfig) (*PodController, error) {
+func NewPodController(conf PodControllerConfig, sets *providerSets) (*PodController, error) {
 	cidrIPNet, err := parseCIDR(conf.CIDR)
 	if err != nil {
 		return nil, err
@@ -85,6 +86,7 @@ func NewPodController(conf PodControllerConfig) (*PodController, error) {
 		lockPodParallelism:                conf.LockPodParallelism,
 		deletePodChan:                     make(chan *corev1.Pod),
 		deletePodParallelism:              conf.DeletePodParallelism,
+		providers:                         sets,
 	}
 	n.funcMap = template.FuncMap{
 		"NodeIP": func() string {
@@ -92,6 +94,60 @@ func NewPodController(conf PodControllerConfig) (*PodController, error) {
 		},
 		"PodIP": func() string {
 			return n.ipPool.Get()
+		},
+		"Finish": func(in map[string]interface{}, key string, schedule string) bool {
+			pod := metav1.ObjectMeta{}
+			marshal, _ := json.Marshal(in["metadata"])
+			e := json.Unmarshal(marshal, &pod)
+			if e != nil {
+				return false
+			}
+			start := metav1.Time{}
+			e = json.Unmarshal([]byte(schedule), &start)
+			if e != nil {
+				return false
+			}
+			success := pod.Annotations[key]
+			duration, e := time.ParseDuration(success)
+			if e == nil && time.Since(start.Add(duration)) > 0 {
+				return true
+			}
+			return false
+		},
+		"Schedule": func(in map[string]interface{}) string {
+			pod := corev1.PodStatus{}
+			marshal, _ := json.Marshal(in["status"])
+			e := json.Unmarshal(marshal, &pod)
+			if e != nil {
+				r2, _ := json.Marshal(metav1.NewTime(time.Now()))
+				return string(r2)
+			}
+			for _, c := range pod.Conditions {
+				if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionTrue {
+					r2, _ := json.Marshal(c.LastTransitionTime)
+					return string(r2)
+				}
+			}
+
+			return ""
+		},
+		"LastTime": func(in map[string]interface{}, key string, schedule string) string {
+			pod := metav1.ObjectMeta{}
+			marshal, _ := json.Marshal(in["metadata"])
+			e := json.Unmarshal(marshal, &pod)
+			if e != nil {
+				return ""
+			}
+			start := metav1.Time{}
+			e = json.Unmarshal([]byte(schedule), &start)
+			if e != nil {
+				return ""
+			}
+			success := pod.Annotations[key]
+			duration, _ := time.ParseDuration(success)
+
+			r2, _ := json.Marshal(metav1.NewTime(start.Add(duration)))
+			return string(r2)
 		},
 	}
 	for k, v := range conf.FuncMap {
@@ -159,7 +215,7 @@ func (c *PodController) DeletePods(ctx context.Context, pods <-chan *corev1.Pod)
 				}
 			} else {
 				if c.logger != nil {
-					c.logger.Printf("Delete pod %s.%s on %s", pod.Name, pod.Namespace, pod.Spec.NodeName)
+					//c.logger.Printf("Delete pod %s.%s on %s", pod.Name, pod.Namespace, pod.Spec.NodeName)
 				}
 			}
 		})
@@ -174,16 +230,33 @@ func (c *PodController) LockPod(ctx context.Context, pod *corev1.Pod) error {
 		c.podCustomStatusAnnotationSelector.Matches(labels.Set(pod.Annotations)) {
 		return nil
 	}
-	patch, err := c.configurePod(pod)
-	if err != nil {
-		return err
-	}
-	if patch == nil {
-		if c.logger != nil {
-			c.logger.Printf("Skip pod %s.%s on %s: do not need to modify", pod.Name, pod.Namespace, pod.Spec.NodeName)
-		}
+	provider := c.providers.Get(pod.Spec.NodeName)
+	if pod.DeletionTimestamp != nil {
+		provider.DeletePod(pod)
+		c.DeletePod(ctx, pod)
 		return nil
 	}
+
+	patch, err := c.configurePod(pod)
+	if err != nil {
+		c.logger.Printf("configurePod %s, err:%v", pod.Name, err)
+		return err
+	}
+
+	defer func() {
+		pod, err = c.clientSet.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		if err == nil && provider != nil {
+			c.logger.Printf("Add Pod %s, Status:%s", pod.Name, pod.Status.Phase)
+			provider.AddPod(pod)
+		} else {
+			c.logger.Printf("Add Pod %s, err:%v, provider:%v", pod.Name, err, provider)
+		}
+	}()
+
+	if patch == nil {
+		return nil
+	}
+
 	_, err = c.clientSet.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.StrategicMergePatchType, patch, metav1.PatchOptions{}, "status")
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -191,6 +264,7 @@ func (c *PodController) LockPod(ctx context.Context, pod *corev1.Pod) error {
 		}
 		return err
 	}
+
 	return nil
 }
 
@@ -251,10 +325,10 @@ func (c *PodController) WatchPods(ctx context.Context, lockChan, deleteChan chan
 					pod := event.Object.(*corev1.Pod)
 					if c.nodeHasFunc(pod.Spec.NodeName) {
 						lockChan <- pod.DeepCopy()
-					} else {
-						if c.logger != nil {
-							c.logger.Printf("Skip pod %s.%s on %s: not take over", pod.Name, pod.Namespace, pod.Spec.NodeName)
-						}
+						//} else {
+						//	if c.logger != nil {
+						//		c.logger.Printf("Skip pod %s.%s on %s: not take over", pod.Name, pod.Namespace, pod.Spec.NodeName)
+						//	}
 					}
 				case watch.Modified:
 					pod := event.Object.(*corev1.Pod)
@@ -265,7 +339,7 @@ func (c *PodController) WatchPods(ctx context.Context, lockChan, deleteChan chan
 							deleteChan <- pod.DeepCopy()
 						} else {
 							if c.logger != nil {
-								c.logger.Printf("Skip pod %s.%s on %s: not take over", pod.Name, pod.Namespace, pod.Spec.NodeName)
+								//c.logger.Printf("Skip pod %s.%s on %s: not take over", pod.Name, pod.Namespace, pod.Spec.NodeName)
 							}
 						}
 					} else {
@@ -273,7 +347,7 @@ func (c *PodController) WatchPods(ctx context.Context, lockChan, deleteChan chan
 							lockChan <- pod.DeepCopy()
 						} else {
 							if c.logger != nil {
-								c.logger.Printf("Skip pod %s.%s on %s: not take over", pod.Name, pod.Namespace, pod.Spec.NodeName)
+								//c.logger.Printf("Skip pod %s.%s on %s: not take over", pod.Name, pod.Namespace, pod.Spec.NodeName)
 							}
 						}
 					}
@@ -304,8 +378,10 @@ func (c *PodController) ListPods(ctx context.Context, ch chan<- *corev1.Pod, opt
 	listPager := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
 		return c.clientSet.CoreV1().Pods(corev1.NamespaceAll).List(ctx, opts)
 	})
+
 	return listPager.EachListItem(ctx, opt, func(obj runtime.Object) error {
 		pod := obj.(*corev1.Pod)
+
 		if c.nodeHasFunc(pod.Spec.NodeName) {
 			ch <- pod.DeepCopy()
 		}

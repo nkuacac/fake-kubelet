@@ -24,6 +24,7 @@ type NodeController struct {
 	nodeSelectorFunc         func(node *corev1.Node) bool
 	nodeLabelSelector        string
 	lockPodsOnNodeFunc       func(nodeName string) error
+	getDaemonPortFunc        func(nodeName string) string
 	nodesSets                *stringSets
 	nodeTemplate             string
 	nodeHeartbeatTemplate    string
@@ -34,6 +35,7 @@ type NodeController struct {
 	nodeHeartbeatParallelism int
 	lockNodeParallelism      int
 	nodeChan                 chan string
+	providers                *providerSets
 }
 
 // NodeControllerConfig is the configuration for the NodeController
@@ -42,6 +44,7 @@ type NodeControllerConfig struct {
 	NodeSelectorFunc           func(node *corev1.Node) bool
 	NodeLabelSelector          string
 	LockPodsOnNodeFunc         func(nodeName string) error
+	GetDaemonPortFunc          func(nodeName string) string
 	NodeIP                     string
 	NodeTemplate               string
 	NodeInitializationTemplate string
@@ -54,11 +57,12 @@ type NodeControllerConfig struct {
 }
 
 // NewNodeController creates a new fake nodes controller
-func NewNodeController(conf NodeControllerConfig) (*NodeController, error) {
+func NewNodeController(conf NodeControllerConfig, sets *providerSets) (*NodeController, error) {
 	n := &NodeController{
 		clientSet:                conf.ClientSet,
 		nodeSelectorFunc:         conf.NodeSelectorFunc,
 		nodeLabelSelector:        conf.NodeLabelSelector,
+		getDaemonPortFunc:        conf.GetDaemonPortFunc,
 		lockPodsOnNodeFunc:       conf.LockPodsOnNodeFunc,
 		nodeIP:                   conf.NodeIP,
 		nodesSets:                newStringSets(),
@@ -70,10 +74,26 @@ func NewNodeController(conf NodeControllerConfig) (*NodeController, error) {
 		nodeHeartbeatParallelism: conf.NodeHeartbeatParallelism,
 		lockNodeParallelism:      conf.LockNodeParallelism,
 		nodeChan:                 make(chan string),
+		providers:                sets,
 	}
 	n.funcMap = template.FuncMap{
 		"NodeIP": func() string {
 			return n.nodeIP
+		},
+		"DaemonPort": func(in map[string]interface{}) string {
+			node := metav1.ObjectMeta{}
+			//n.logger.Printf("DaemonPort in: %v", in)
+			marshal, err := json.Marshal(in["metadata"])
+			if err != nil {
+				n.logger.Printf("DaemonPort %v, %s", err, string(marshal))
+			}
+			e := json.Unmarshal(marshal, &node)
+			if e != nil {
+				return "0"
+			}
+			get := n.getDaemonPortFunc(node.Name)
+			//n.logger.Printf("DaemonPort: %s", get)
+			return get
 		},
 	}
 	for k, v := range conf.FuncMap {
@@ -223,13 +243,13 @@ func (c *NodeController) WatchNodes(ctx context.Context, ch chan<- string, opt m
 					}
 				}
 				switch event.Type {
-				case watch.Added:
+				case watch.Added, watch.Modified:
 					node := event.Object.(*corev1.Node)
-					if !c.nodesSets.Has(node.Name) && c.nodeSelectorFunc(node) {
+					//if !c.nodesSets.Has(node.Name) {
+					if c.nodeSelectorFunc(node) {
 						ch <- node.Name
 					}
-				case watch.Modified:
-					// node is modified, do nothing
+					//}
 				case watch.Deleted:
 					node := event.Object.(*corev1.Node)
 					if c.nodesSets.Has(node.Name) {
@@ -272,7 +292,7 @@ func (c *NodeController) ListNodes(ctx context.Context, ch chan<- string, opt me
 func (c *NodeController) LockNodes(ctx context.Context, nodes <-chan string) {
 	tasks := newParallelTasks(c.lockNodeParallelism)
 	for node := range nodes {
-		if node == "" || c.nodesSets.Has(node) {
+		if node == "" {
 			continue
 		}
 		localNode := node
@@ -307,6 +327,7 @@ func (c *NodeController) LockNode(ctx context.Context, nodeName string) (*corev1
 			return nil, err
 		}
 		node, err = c.newNode(nodeName)
+
 		if err != nil {
 			return nil, err
 		}
@@ -319,7 +340,7 @@ func (c *NodeController) LockNode(ctx context.Context, nodeName string) (*corev1
 		}
 		return node, nil
 	}
-
+	c.providers.Get(nodeName).Node = node
 	patch, err := c.configureNode(node)
 	if err != nil {
 		return nil, err
@@ -360,6 +381,7 @@ func (c *NodeController) newNode(nodeName string) (*corev1.Node, error) {
 }
 
 func (c *NodeController) configureNode(node *corev1.Node) ([]byte, error) {
+	c.logger.Printf("configureNode %s", node.Name)
 	patch, err := toTemplateJson(c.nodeStatusTemplate, node, c.funcMap)
 	if err != nil {
 		return nil, err

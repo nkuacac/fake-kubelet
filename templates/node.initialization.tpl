@@ -1,12 +1,9 @@
+{{ $port := DaemonPort . }}
 {{ with .status }}
 
 addresses:
-{{ with .addresses }}
-{{ YAML . 1 }}
-{{ else }}
 - address: {{ NodeIP }}
   type: InternalIP
-{{ end }}
 
 allocatable:
 {{ with .allocatable }}
@@ -25,6 +22,10 @@ capacity:
   memory: 1Ti
   pods: 1M
 {{ end }}
+
+daemonEndpoints:
+  kubeletEndpoint:
+    Port: {{ $port }}
 
 {{ with .nodeInfo }}
 nodeInfo:

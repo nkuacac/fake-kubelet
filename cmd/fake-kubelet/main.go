@@ -197,16 +197,16 @@ func main() {
 	go func() {
 		for _, n := range strings.SplitN(nodeName, ",", -1) {
 			if n != "" {
-				err = controller.CreateNode(ctx, n)
+				err = controller.CreateNode(ctx, n, 0)
 				if err != nil {
 					logger.Printf("Failed create node %q: %v", n, err)
 				}
 			}
 		}
 		if generateNodeName != "" {
-			fake_kubelet.GenerateSerialNumber(int(generateReplicas), int(generateSerialLength), func(s string) bool {
+			fake_kubelet.GenerateSerialNumber(int(generateReplicas), int(generateSerialLength), func(s string, port int) bool {
 				name := generateNodeName + s
-				err = controller.CreateNode(ctx, generateNodeName+s)
+				err = controller.CreateNode(ctx, generateNodeName+s, port)
 				if err != nil {
 					logger.Printf("Failed create node %q: %v", name, err)
 					return false

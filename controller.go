@@ -3,6 +3,11 @@ package fake_kubelet
 import (
 	"context"
 	"fmt"
+
+	"github.com/wzshiming/fake-kubelet/metrics/collectors"
+	"github.com/wzshiming/fake-kubelet/metrics/stats"
+	"net"
+	"net/http"
 	"strings"
 	"text/template"
 	"time"
@@ -10,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
+	compbasemetrics "k8s.io/component-base/metrics"
 	"sigs.k8s.io/yaml"
 )
 
@@ -41,8 +47,9 @@ var (
 
 // Controller is a fake kubelet implementation that can be used to test
 type Controller struct {
-	nodes *NodeController
-	pods  *PodController
+	nodes     *NodeController
+	pods      *PodController
+	providers *providerSets
 }
 
 type Config struct {
@@ -67,6 +74,8 @@ type Logger interface {
 func NewController(conf Config) (*Controller, error) {
 	var nodeSelectorFunc func(node *corev1.Node) bool
 	var nodeLabelSelector string
+	providers := newProviderSets()
+
 	if conf.TakeOverAll {
 		nodeSelectorFunc = func(node *corev1.Node) bool {
 			return true
@@ -77,7 +86,11 @@ func NewController(conf Config) (*Controller, error) {
 			return nil, err
 		}
 		nodeSelectorFunc = func(node *corev1.Node) bool {
-			return selector.Matches(labels.Set(node.Labels))
+			if providers.Size() == 0 {
+				return selector.Matches(labels.Set(node.Labels))
+			} else {
+				return providers.Has(node.Name)
+			}
 		}
 		nodeLabelSelector = selector.String()
 	}
@@ -92,6 +105,14 @@ func NewController(conf Config) (*Controller, error) {
 		LockPodsOnNodeFunc: func(nodeName string) error {
 			return lockPodsOnNodeFunc(context.Background(), nodeName)
 		},
+		GetDaemonPortFunc: func(nodeName string) string {
+			node := providers.Get(nodeName)
+			if node != nil {
+				conf.Logger.Printf("GetDaemonPortFunc nodeName: %s port: %d", nodeName, node.Port)
+				return fmt.Sprintf("%d", node.Port)
+			}
+			return "0"
+		},
 		NodeTemplate:               conf.NodeTemplate,
 		NodeInitializationTemplate: conf.NodeInitializationTemplate,
 		NodeHeartbeatTemplate:      conf.NodeHeartbeatTemplate,
@@ -100,7 +121,7 @@ func NewController(conf Config) (*Controller, error) {
 		LockNodeParallelism:        16,
 		Logger:                     conf.Logger,
 		FuncMap:                    funcMap,
-	})
+	}, providers)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create nodes controller: %v", err)
 	}
@@ -116,7 +137,7 @@ func NewController(conf Config) (*Controller, error) {
 		NodeHasFunc:                       nodes.Has, // just handle pods that are on nodes we have
 		Logger:                            conf.Logger,
 		FuncMap:                           funcMap,
-	})
+	}, providers)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pods controller: %v", err)
 	}
@@ -124,8 +145,9 @@ func NewController(conf Config) (*Controller, error) {
 	lockPodsOnNodeFunc = pods.LockPodsOnNode
 
 	n := &Controller{
-		pods:  pods,
-		nodes: nodes,
+		pods:      pods,
+		nodes:     nodes,
+		providers: providers,
 	}
 
 	return n, nil
@@ -140,9 +162,51 @@ func (c *Controller) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to start nodes controller: %v", err)
 	}
+
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		for {
+			<-t.C
+			c.providers.Foreach(func(s string) {
+				c.nodes.CreateNode(ctx, s)
+			})
+		}
+	}()
 	return nil
 }
 
-func (c *Controller) CreateNode(ctx context.Context, nodeName string) error {
+func (c *Controller) CreateNode(ctx context.Context, nodeName string, port int) error {
+	provider := NewFakeNode(nodeName, port)
+	c.providers.Put(nodeName, provider)
+
+	go c.Metrics(ctx, provider, port)
+
 	return c.nodes.CreateNode(ctx, nodeName)
+}
+
+func (c *Controller) Metrics(ctx context.Context, statsProvider stats.Provider, port int) {
+	resourceRegistry := compbasemetrics.NewKubeRegistry()
+	resourceRegistry.CustomMustRegister(collectors.NewResourceMetricsCollector(stats.NewResourceAnalyzer(statsProvider)))
+
+	svc := &http.Server{
+		BaseContext: func(_ net.Listener) context.Context {
+			return ctx
+		},
+		Addr: fmt.Sprintf(":%d", port),
+		Handler: http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			fmt.Printf("get url:%v %v\n", r.URL, r.RemoteAddr)
+			switch r.URL.Path {
+			case "/metrics/resource":
+				handler := compbasemetrics.HandlerFor(resourceRegistry, compbasemetrics.HandlerOpts{ErrorHandling: compbasemetrics.ContinueOnError})
+				handler.ServeHTTP(rw, r)
+			default:
+				http.NotFound(rw, r)
+			}
+		}),
+	}
+
+	err := svc.ListenAndServeTLS("./pki/kubelet-tls.crt", "./pki/kubelet-tls.key")
+	if err != nil {
+		fmt.Printf("fatal start server %d, err:%v", port, err)
+	}
 }

@@ -127,7 +127,6 @@ func toTemplateJson(text string, original interface{}, funcMap template.FuncMap)
 	if err != nil {
 		return nil, err
 	}
-
 	var data interface{}
 	decoder := json.NewDecoder(buf)
 	decoder.UseNumber()
@@ -278,12 +277,12 @@ func modifyStatusByAnnotations(origin []byte, anno map[string]string) ([]byte, e
 	return origin, nil
 }
 
-func GenerateSerialNumber(n int, minLen int, fun func(string) bool) {
+func GenerateSerialNumber(n int, minLen int, fun func(string, int) bool) {
 	if n <= 0 {
 		return
 	}
 	for i := 0; i != n; i++ {
-		if !fun(fmt.Sprintf("%0*d", minLen, i)) {
+		if !fun(fmt.Sprintf("%0*d", minLen, i), i+40000) {
 			break
 		}
 	}
