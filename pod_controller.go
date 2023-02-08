@@ -192,6 +192,9 @@ func (c *PodController) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 		}
 	}
 
+	provider := c.providers.Get(pod.Spec.NodeName)
+	provider.DeletePod(pod)
+
 	err := c.clientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, deleteOpt)
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -212,10 +215,6 @@ func (c *PodController) DeletePods(ctx context.Context, pods <-chan *corev1.Pod)
 			if err != nil {
 				if c.logger != nil {
 					c.logger.Printf("Failed to delete pod %s.%s on %s: %s", localPod.Name, localPod.Namespace, localPod.Spec.NodeName, err)
-				}
-			} else {
-				if c.logger != nil {
-					//c.logger.Printf("Delete pod %s.%s on %s", pod.Name, pod.Namespace, pod.Spec.NodeName)
 				}
 			}
 		})
@@ -337,18 +336,10 @@ func (c *PodController) WatchPods(ctx context.Context, lockChan, deleteChan chan
 					if pod.DeletionTimestamp != nil {
 						if c.nodeHasFunc(pod.Spec.NodeName) {
 							deleteChan <- pod.DeepCopy()
-						} else {
-							if c.logger != nil {
-								//c.logger.Printf("Skip pod %s.%s on %s: not take over", pod.Name, pod.Namespace, pod.Spec.NodeName)
-							}
 						}
 					} else {
 						if c.nodeHasFunc(pod.Spec.NodeName) {
 							lockChan <- pod.DeepCopy()
-						} else {
-							if c.logger != nil {
-								//c.logger.Printf("Skip pod %s.%s on %s: not take over", pod.Name, pod.Namespace, pod.Spec.NodeName)
-							}
 						}
 					}
 				case watch.Deleted:

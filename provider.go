@@ -171,7 +171,7 @@ func cpuFromLimit(pod *v1.Pod, container v1.Container, cpu *uint64) bool {
 func cpuFromRequest(pod *v1.Pod, container v1.Container, cpu *uint64) bool {
 	if container.Resources.Requests != nil {
 		if container.Resources.Requests.Cpu().MilliValue() > 0 {
-			*cpu = uint64(container.Resources.Requests.Cpu().MilliValue()) * uint64(time.Since(pod.Status.StartTime.Time).Microseconds()) * 85 / 100
+			*cpu = uint64(container.Resources.Requests.Cpu().MilliValue()) * uint64(time.Since(pod.Status.StartTime.Time).Microseconds()) * 3 / 100
 			return true
 		}
 	}
@@ -201,7 +201,7 @@ func memFromLimit(container v1.Container, mem *uint64) bool {
 func memFromRequest(container v1.Container, mem *uint64) bool {
 	if container.Resources.Requests != nil {
 		if container.Resources.Requests.Memory().Value() > 0 {
-			*mem = uint64(container.Resources.Requests.Memory().Value()) * 85 / 100
+			*mem = uint64(container.Resources.Requests.Memory().Value()) * 50 / 100
 			return true
 		}
 	}

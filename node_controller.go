@@ -21,6 +21,8 @@ import (
 type NodeController struct {
 	clientSet                kubernetes.Interface
 	nodeIP                   string
+	nodeApp                  string
+	nodeGroup                string
 	nodeSelectorFunc         func(node *corev1.Node) bool
 	nodeLabelSelector        string
 	lockPodsOnNodeFunc       func(nodeName string) error
@@ -57,7 +59,7 @@ type NodeControllerConfig struct {
 }
 
 // NewNodeController creates a new fake nodes controller
-func NewNodeController(conf NodeControllerConfig, sets *providerSets) (*NodeController, error) {
+func NewNodeController(conf NodeControllerConfig, app, group string, sets *providerSets) (*NodeController, error) {
 	n := &NodeController{
 		clientSet:                conf.ClientSet,
 		nodeSelectorFunc:         conf.NodeSelectorFunc,
@@ -65,6 +67,8 @@ func NewNodeController(conf NodeControllerConfig, sets *providerSets) (*NodeCont
 		getDaemonPortFunc:        conf.GetDaemonPortFunc,
 		lockPodsOnNodeFunc:       conf.LockPodsOnNodeFunc,
 		nodeIP:                   conf.NodeIP,
+		nodeApp:                  app,
+		nodeGroup:                group,
 		nodesSets:                newStringSets(),
 		logger:                   conf.Logger,
 		nodeTemplate:             conf.NodeTemplate,
@@ -79,6 +83,12 @@ func NewNodeController(conf NodeControllerConfig, sets *providerSets) (*NodeCont
 	n.funcMap = template.FuncMap{
 		"NodeIP": func() string {
 			return n.nodeIP
+		},
+		"Group": func() string {
+			return n.nodeGroup
+		},
+		"App": func() string {
+			return n.nodeApp
 		},
 		"DaemonPort": func(in map[string]interface{}) string {
 			node := metav1.ObjectMeta{}
@@ -381,7 +391,7 @@ func (c *NodeController) newNode(nodeName string) (*corev1.Node, error) {
 }
 
 func (c *NodeController) configureNode(node *corev1.Node) ([]byte, error) {
-	c.logger.Printf("configureNode %s", node.Name)
+	//c.logger.Printf("configureNode %s", node.Name)
 	patch, err := toTemplateJson(c.nodeStatusTemplate, node, c.funcMap)
 	if err != nil {
 		return nil, err

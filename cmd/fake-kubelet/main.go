@@ -28,8 +28,10 @@ import (
 
 var (
 	cidr                              = getEnv("CIDR", "10.0.0.1/24")
-	nodeIP                            = net.ParseIP(getEnv("NODE_IP", "196.168.0.1"))
+	nodeIP                            = net.ParseIP(getEnv("NODE_IP", "10.86.120.228"))
 	nodeName                          = getEnv("NODE_NAME", "fake")
+	appName                           = getEnv("NODE_APP", "")
+	groupName                         = getEnv("NODE_GROUP", "")
 	takeOverAll                       = getEnvBool("TAKE_OVER_ALL", false)
 	takeOverLabelsSelector            = getEnv("TAKE_OVER_LABELS_SELECTOR", "type=fake-kubelet")
 	podCustomStatusAnnotationSelector = getEnv("POD_CUSTOM_STATUS_ANNOTATION_SELECTOR", "fake=custom")
@@ -57,6 +59,8 @@ func init() {
 	pflag.StringVar(&cidr, "cidr", cidr, "CIDR of the pod ip")
 	pflag.IPVar(&nodeIP, "node-ip", nodeIP, "IP of the node")
 	pflag.StringVarP(&nodeName, "node-name", "n", nodeName, "Names of the node")
+	pflag.StringVarP(&appName, "app-name", "a", appName, "Names of the app")
+	pflag.StringVarP(&groupName, "node-group", "g", groupName, "Names of the pod")
 	pflag.BoolVar(&takeOverAll, "take-over-all", takeOverAll, "Take over all nodes, there should be no nodes maintained by real Kubelet in the cluster")
 	pflag.StringVar(&takeOverLabelsSelector, "take-over-labels-selector", takeOverLabelsSelector, "Selector of nodes to take over")
 	pflag.StringVar(&podCustomStatusAnnotationSelector, "pod-custom-status-annotation-selector", podCustomStatusAnnotationSelector, "Selector of pods that with this annotation will no longer maintain status and will be left to others to modify it")
@@ -180,7 +184,7 @@ func main() {
 		NodeTemplate:                      nodeTemplate,
 		NodeHeartbeatTemplate:             nodeHeartbeatTemplate,
 		NodeInitializationTemplate:        nodeInitializationTemplate,
-	})
+	}, appName, groupName)
 	if err != nil {
 		logger.Fatalln(err)
 	}
@@ -195,18 +199,13 @@ func main() {
 	}
 
 	go func() {
-		for _, n := range strings.SplitN(nodeName, ",", -1) {
-			if n != "" {
-				err = controller.CreateNode(ctx, n, 0)
-				if err != nil {
-					logger.Printf("Failed create node %q: %v", n, err)
-				}
-			}
-		}
 		if generateNodeName != "" {
 			fake_kubelet.GenerateSerialNumber(int(generateReplicas), int(generateSerialLength), func(s string, port int) bool {
 				name := generateNodeName + s
-				err = controller.CreateNode(ctx, generateNodeName+s, port)
+				if groupName != "" {
+					name = groupName + "-" + s
+				}
+				err = controller.CreateNode(ctx, name, port)
 				if err != nil {
 					logger.Printf("Failed create node %q: %v", name, err)
 					return false
@@ -215,7 +214,6 @@ func main() {
 			})
 		}
 	}()
-
 	<-ctx.Done()
 }
 

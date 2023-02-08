@@ -71,7 +71,7 @@ type Logger interface {
 }
 
 // NewController creates a new fake kubelet controller
-func NewController(conf Config) (*Controller, error) {
+func NewController(conf Config, app string, group string) (*Controller, error) {
 	var nodeSelectorFunc func(node *corev1.Node) bool
 	var nodeLabelSelector string
 	providers := newProviderSets()
@@ -80,6 +80,19 @@ func NewController(conf Config) (*Controller, error) {
 		nodeSelectorFunc = func(node *corev1.Node) bool {
 			return true
 		}
+	} else if group != "" {
+		selector, err := labels.Parse("group=" + group)
+		if err != nil {
+			return nil, err
+		}
+		nodeSelectorFunc = func(node *corev1.Node) bool {
+			if providers.Size() == 0 {
+				return selector.Matches(labels.Set(node.Labels))
+			} else {
+				return providers.Has(node.Name)
+			}
+		}
+		nodeLabelSelector = selector.String()
 	} else if conf.TakeOverLabelsSelector != "" {
 		selector, err := labels.Parse(conf.TakeOverLabelsSelector)
 		if err != nil {
@@ -108,7 +121,7 @@ func NewController(conf Config) (*Controller, error) {
 		GetDaemonPortFunc: func(nodeName string) string {
 			node := providers.Get(nodeName)
 			if node != nil {
-				conf.Logger.Printf("GetDaemonPortFunc nodeName: %s port: %d", nodeName, node.Port)
+				//conf.Logger.Printf("GetDaemonPortFunc nodeName: %s port: %d", nodeName, node.Port)
 				return fmt.Sprintf("%d", node.Port)
 			}
 			return "0"
@@ -121,7 +134,7 @@ func NewController(conf Config) (*Controller, error) {
 		LockNodeParallelism:        16,
 		Logger:                     conf.Logger,
 		FuncMap:                    funcMap,
-	}, providers)
+	}, app, group, providers)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create nodes controller: %v", err)
 	}
@@ -168,7 +181,10 @@ func (c *Controller) Start(ctx context.Context) error {
 		for {
 			<-t.C
 			c.providers.Foreach(func(s string) {
-				c.nodes.CreateNode(ctx, s)
+				err = c.nodes.CreateNode(ctx, s)
+				if err != nil {
+					fmt.Printf("create node err:%v", err)
+				}
 			})
 		}
 	}()
