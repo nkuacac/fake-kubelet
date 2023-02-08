@@ -262,10 +262,10 @@ func (c *PodController) LockPods(ctx context.Context, pods <-chan *corev1.Pod) {
 				if c.logger != nil {
 					c.logger.Printf("Failed to lock pod %s.%s on %s: %s", localPod.Name, localPod.Namespace, localPod.Spec.NodeName, err)
 				}
-			} else {
-				if c.logger != nil {
-					c.logger.Printf("Lock pod %s.%s on %s", localPod.Name, localPod.Namespace, localPod.Spec.NodeName)
-				}
+				//} else {
+				//	if c.logger != nil {
+				//		c.logger.Printf("Lock pod %s.%s on %s", localPod.Name, localPod.Namespace, localPod.Spec.NodeName)
+				//	}
 			}
 		})
 	}
@@ -370,6 +370,12 @@ func (c *PodController) LockPodsOnNode(ctx context.Context, inf *informer.PodsIn
 	//	FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(),
 	//})
 	for _, pod := range inf.List() {
+		if pod.Status.Phase != "Running" {
+			continue
+		}
+		if _, ok := pod.Annotations["last"]; !ok {
+			continue
+		}
 		c.lockPodChan <- pod.DeepCopy()
 	}
 	return nil

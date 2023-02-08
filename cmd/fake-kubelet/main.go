@@ -207,6 +207,11 @@ func main() {
 				if groupName != "" {
 					name = groupName + "-" + s
 				}
+				clientset, err := newClientset(master, kubeconfig)
+				if err != nil {
+					logger.Fatalln(err)
+				}
+				logger.Printf("to create node %q", name)
 				err = controller.CreateNode(ctx, name, port, clientset)
 				if err != nil {
 					logger.Printf("Failed create node %q: %v", name, err)

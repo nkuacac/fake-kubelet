@@ -9,6 +9,7 @@ import (
 	"github.com/wzshiming/fake-kubelet/metrics/collectors"
 	"github.com/wzshiming/fake-kubelet/metrics/stats"
 	statsapi "github.com/wzshiming/fake-kubelet/metrics/stats/v1alpha1"
+	"io"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,6 +19,7 @@ import (
 	"k8s.io/kubernetes/pkg/volume"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
@@ -31,15 +33,25 @@ type FakeNode struct {
 	started  bool
 }
 
-func (fn *FakeNode) Start() {
+func (fn *FakeNode) Once() bool {
+	fn.mut.Lock()
+	defer fn.mut.Unlock()
+	once := fn.started
 	if !fn.started {
-		fn.Informer.Start()
-		go fn.Metrics(context.TODO())
 		fn.started = true
+	}
+	return once
+}
+func (fn *FakeNode) Start(logger Logger) {
+	if !fn.Once() {
+		s := time.Now()
+		fn.Informer.Start()
+		logger.Printf("informer start takes: %v", time.Since(s))
+		go fn.Metrics(context.TODO(), logger)
 	}
 }
 
-func (fn *FakeNode) Metrics(ctx context.Context) {
+func (fn *FakeNode) Metrics(ctx context.Context, logger Logger) {
 	resourceRegistry := compbasemetrics.NewKubeRegistry()
 	resourceRegistry.CustomMustRegister(collectors.NewResourceMetricsCollector(stats.NewResourceAnalyzer(fn)))
 
@@ -49,25 +61,77 @@ func (fn *FakeNode) Metrics(ctx context.Context) {
 		},
 		Addr: fmt.Sprintf(":%d", fn.Port),
 		Handler: http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-			fmt.Printf("get url:%v %v\n", r.URL, r.RemoteAddr)
+
 			switch r.URL.Path {
 			case "/metrics/resource":
 				handler := compbasemetrics.HandlerFor(resourceRegistry, compbasemetrics.HandlerOpts{ErrorHandling: compbasemetrics.ContinueOnError})
 				handler.ServeHTTP(rw, r)
-			case "/dump":
-				fn.GetPods()
 			default:
+				logger.Printf("get url:%v %v\n", r.URL, r.RemoteAddr)
 				http.NotFound(rw, r)
 			}
 		}),
 	}
 
-	err := svc.ListenAndServeTLS("./pki/kubelet-tls.crt", "./pki/kubelet-tls.key")
-	if err != nil {
-		fmt.Printf("fatal start server %d, err:%v", fn.Port, err)
+	csrname := "/pki/kubelet-tls.crt"
+	keyname := "/pki/kubelet-tls.key"
+	stat1, err1 := os.Stat(csrname)
+	if err1 != nil {
+		logger.Printf("/pki/kubelet-tls.crt %v", err1)
+		return
 	}
-}
+	stat2, err2 := os.Stat(keyname)
+	if err2 != nil {
+		logger.Printf("/pki/kubelet-tls.key %v", err2)
+		return
+	}
+	logger.Printf("to start server %d, crt: %d, key: %d", fn.Port, stat1.Size(), stat2.Size())
+	//dirname := "pki-" + fn.Name
+	//if err := os.MkdirAll(dirname, 0644); err != nil {
+	//	logger.Printf("prepare pkk dir failed", err)
+	//	return
+	//}
+	//csrname := path.Join(dirname, "kubelet-tls.csr")
+	//if err := File("/pki/kubelet-tls.csr", csrname); err != nil {
+	//	logger.Printf("prepare kubelet-tls.csr", err)
+	//	return
+	//}
+	//keyname := path.Join(dirname, "kubelet-tls.key")
+	//if err := File("/pki/kubelet-tls.key", keyname); err != nil {
+	//	logger.Printf("prepare kubelet-tls.crt", err)
+	//	return
+	//}
 
+	err := svc.ListenAndServeTLS(csrname, keyname)
+	if err != nil {
+		logger.Printf("fatal start server %d, err:%v", fn.Port, err)
+	}
+	logger.Printf("success start server %d", fn.Port)
+}
+func File(src, dst string) error {
+	var err error
+	var srcfd *os.File
+	var dstfd *os.File
+	var srcinfo os.FileInfo
+
+	if srcfd, err = os.Open(src); err != nil {
+		return err
+	}
+	defer srcfd.Close()
+
+	if dstfd, err = os.Create(dst); err != nil {
+		return err
+	}
+	defer dstfd.Close()
+
+	if _, err = io.Copy(dstfd, srcfd); err != nil {
+		return err
+	}
+	if srcinfo, err = os.Stat(src); err != nil {
+		return err
+	}
+	return os.Chmod(dst, srcinfo.Mode())
+}
 func NewFakeNode(name string, port int, c kubernetes.Interface) *FakeNode {
 	return &FakeNode{
 		Name:     name,
@@ -164,6 +228,9 @@ func (fn *FakeNode) GetCgroupCPUAndMemoryStats(cgroupName string, updateStats bo
 	allc := uint64(0)
 	allm := uint64(0)
 	for _, pod := range fn.Informer.List() {
+		if pod.Status.Phase != v1.PodRunning {
+			continue
+		}
 		for _, container := range pod.Spec.Containers {
 			cpu, mem := containerMetrics(pod, container)
 			allc += cpu

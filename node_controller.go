@@ -336,7 +336,7 @@ func (c *NodeController) LockNode(ctx context.Context, nodeName string) (*corev1
 	if provider == nil {
 		return nil, fmt.Errorf("provider %s not init", nodeName)
 	}
-
+	provider.Start(c.logger)
 	node, err := c.clientSet.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -356,7 +356,7 @@ func (c *NodeController) LockNode(ctx context.Context, nodeName string) (*corev1
 		}
 		return node, nil
 	}
-	provider.Start()
+
 	provider.Node = node
 	patch, err := c.configureNode(node)
 	if err != nil {
@@ -366,9 +366,9 @@ func (c *NodeController) LockNode(ctx context.Context, nodeName string) (*corev1
 	if err != nil {
 		return nil, err
 	}
-	if c.logger != nil {
-		c.logger.Printf("Lock node %s", nodeName)
-	}
+	//if c.logger != nil {
+	//	c.logger.Printf("Lock node %s", nodeName)
+	//}
 	return node, nil
 }
 
