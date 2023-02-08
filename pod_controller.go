@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/wzshiming/fake-kubelet/informer"
 	"net"
 	"strings"
 	"text/template"
@@ -44,7 +45,6 @@ type PodController struct {
 	lockPodParallelism                int
 	deletePodChan                     chan *corev1.Pod
 	deletePodParallelism              int
-	providers                         *providerSets
 }
 
 // PodControllerConfig is the configuration for the PodController
@@ -62,7 +62,7 @@ type PodControllerConfig struct {
 }
 
 // NewPodController creates a new fake pods controller
-func NewPodController(conf PodControllerConfig, sets *providerSets) (*PodController, error) {
+func NewPodController(conf PodControllerConfig) (*PodController, error) {
 	cidrIPNet, err := parseCIDR(conf.CIDR)
 	if err != nil {
 		return nil, err
@@ -86,7 +86,6 @@ func NewPodController(conf PodControllerConfig, sets *providerSets) (*PodControl
 		lockPodParallelism:                conf.LockPodParallelism,
 		deletePodChan:                     make(chan *corev1.Pod),
 		deletePodParallelism:              conf.DeletePodParallelism,
-		providers:                         sets,
 	}
 	n.funcMap = template.FuncMap{
 		"NodeIP": func() string {
@@ -192,9 +191,6 @@ func (c *PodController) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 		}
 	}
 
-	provider := c.providers.Get(pod.Spec.NodeName)
-	provider.DeletePod(pod)
-
 	err := c.clientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, deleteOpt)
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -229,9 +225,7 @@ func (c *PodController) LockPod(ctx context.Context, pod *corev1.Pod) error {
 		c.podCustomStatusAnnotationSelector.Matches(labels.Set(pod.Annotations)) {
 		return nil
 	}
-	provider := c.providers.Get(pod.Spec.NodeName)
 	if pod.DeletionTimestamp != nil {
-		provider.DeletePod(pod)
 		c.DeletePod(ctx, pod)
 		return nil
 	}
@@ -241,16 +235,6 @@ func (c *PodController) LockPod(ctx context.Context, pod *corev1.Pod) error {
 		c.logger.Printf("configurePod %s, err:%v", pod.Name, err)
 		return err
 	}
-
-	defer func() {
-		pod, err = c.clientSet.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-		if err == nil && provider != nil {
-			c.logger.Printf("Add Pod %s, Status:%s", pod.Name, pod.Status.Phase)
-			provider.AddPod(pod)
-		} else {
-			c.logger.Printf("Add Pod %s, err:%v, provider:%v", pod.Name, err, provider)
-		}
-	}()
 
 	if patch == nil {
 		return nil
@@ -381,10 +365,14 @@ func (c *PodController) ListPods(ctx context.Context, ch chan<- *corev1.Pod, opt
 }
 
 // LockPodsOnNode locks pods on the node
-func (c *PodController) LockPodsOnNode(ctx context.Context, nodeName string) error {
-	return c.ListPods(ctx, c.lockPodChan, metav1.ListOptions{
-		FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(),
-	})
+func (c *PodController) LockPodsOnNode(ctx context.Context, inf *informer.PodsInf) error {
+	//return c.ListPods(ctx, c.lockPodChan, metav1.ListOptions{
+	//	FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(),
+	//})
+	for _, pod := range inf.List() {
+		c.lockPodChan <- pod.DeepCopy()
+	}
+	return nil
 }
 
 func (c *PodController) configurePod(pod *corev1.Pod) ([]byte, error) {

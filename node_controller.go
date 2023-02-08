@@ -8,6 +8,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/wzshiming/fake-kubelet/informer"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,7 +26,7 @@ type NodeController struct {
 	nodeGroup                string
 	nodeSelectorFunc         func(node *corev1.Node) bool
 	nodeLabelSelector        string
-	lockPodsOnNodeFunc       func(nodeName string) error
+	lockPodsOnNodeFunc       func(inf *informer.PodsInf) error
 	getDaemonPortFunc        func(nodeName string) string
 	nodesSets                *stringSets
 	nodeTemplate             string
@@ -45,7 +46,7 @@ type NodeControllerConfig struct {
 	ClientSet                  kubernetes.Interface
 	NodeSelectorFunc           func(node *corev1.Node) bool
 	NodeLabelSelector          string
-	LockPodsOnNodeFunc         func(nodeName string) error
+	LockPodsOnNodeFunc         func(inf *informer.PodsInf) error
 	GetDaemonPortFunc          func(nodeName string) string
 	NodeIP                     string
 	NodeTemplate               string
@@ -316,7 +317,7 @@ func (c *NodeController) LockNodes(ctx context.Context, nodes <-chan string) {
 				return
 			}
 			if c.lockPodsOnNodeFunc != nil {
-				err = c.lockPodsOnNodeFunc(localNode)
+				err = c.lockPodsOnNodeFunc(c.providers.Get(node).Informer)
 				if err != nil {
 					if c.logger != nil {
 						c.logger.Printf("Failed to lock pods on node %s: %s", localNode, err)
@@ -331,6 +332,11 @@ func (c *NodeController) LockNodes(ctx context.Context, nodes <-chan string) {
 
 // LockNode locks a given node
 func (c *NodeController) LockNode(ctx context.Context, nodeName string) (*corev1.Node, error) {
+	provider := c.providers.Get(nodeName)
+	if provider == nil {
+		return nil, fmt.Errorf("provider %s not init", nodeName)
+	}
+
 	node, err := c.clientSet.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -350,7 +356,8 @@ func (c *NodeController) LockNode(ctx context.Context, nodeName string) (*corev1
 		}
 		return node, nil
 	}
-	c.providers.Get(nodeName).Node = node
+	provider.Start()
+	provider.Node = node
 	patch, err := c.configureNode(node)
 	if err != nil {
 		return nil, err

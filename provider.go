@@ -1,45 +1,80 @@
 package fake_kubelet
 
 import (
+	"context"
+	"fmt"
 	cadvisorapi "github.com/google/cadvisor/info/v1"
 	cadvisorv2 "github.com/google/cadvisor/info/v2"
+	"github.com/wzshiming/fake-kubelet/informer"
+	"github.com/wzshiming/fake-kubelet/metrics/collectors"
 	"github.com/wzshiming/fake-kubelet/metrics/stats"
 	statsapi "github.com/wzshiming/fake-kubelet/metrics/stats/v1alpha1"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	compbasemetrics "k8s.io/component-base/metrics"
 	"k8s.io/kubernetes/pkg/volume"
+	"net"
+	"net/http"
 	"sync"
 	"time"
 )
 
 type FakeNode struct {
-	Name string
-	Port int
-	Node *v1.Node
-	mut  sync.RWMutex
-	Pods map[string]*v1.Pod
+	Name     string
+	Port     int
+	Node     *v1.Node
+	mut      sync.RWMutex
+	Informer *informer.PodsInf
+	started  bool
 }
 
-func NewFakeNode(name string, port int) *FakeNode {
-	return &FakeNode{
-		Name: name,
-		Port: port,
-		Pods: make(map[string]*v1.Pod),
+func (fn *FakeNode) Start() {
+	if !fn.started {
+		fn.Informer.Start()
+		go fn.Metrics(context.TODO())
+		fn.started = true
 	}
 }
 
-func (fn *FakeNode) AddPod(pod *v1.Pod) {
-	fn.mut.Lock()
-	defer fn.mut.Unlock()
-	fn.Pods[pod.Name] = pod
+func (fn *FakeNode) Metrics(ctx context.Context) {
+	resourceRegistry := compbasemetrics.NewKubeRegistry()
+	resourceRegistry.CustomMustRegister(collectors.NewResourceMetricsCollector(stats.NewResourceAnalyzer(fn)))
+
+	svc := &http.Server{
+		BaseContext: func(_ net.Listener) context.Context {
+			return ctx
+		},
+		Addr: fmt.Sprintf(":%d", fn.Port),
+		Handler: http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			fmt.Printf("get url:%v %v\n", r.URL, r.RemoteAddr)
+			switch r.URL.Path {
+			case "/metrics/resource":
+				handler := compbasemetrics.HandlerFor(resourceRegistry, compbasemetrics.HandlerOpts{ErrorHandling: compbasemetrics.ContinueOnError})
+				handler.ServeHTTP(rw, r)
+			case "/dump":
+				fn.GetPods()
+			default:
+				http.NotFound(rw, r)
+			}
+		}),
+	}
+
+	err := svc.ListenAndServeTLS("./pki/kubelet-tls.crt", "./pki/kubelet-tls.key")
+	if err != nil {
+		fmt.Printf("fatal start server %d, err:%v", fn.Port, err)
+	}
 }
 
-func (fn *FakeNode) DeletePod(pod *v1.Pod) {
-	fn.mut.Lock()
-	defer fn.mut.Unlock()
-	delete(fn.Pods, pod.Name)
+func NewFakeNode(name string, port int, c kubernetes.Interface) *FakeNode {
+	return &FakeNode{
+		Name:     name,
+		Port:     port,
+		Informer: informer.NewPodInformer(name, c),
+		started:  false,
+	}
 }
 
 func (fn *FakeNode) ListPodStats() ([]statsapi.PodStats, error) {
@@ -52,7 +87,10 @@ func (fn *FakeNode) ListPodCPUAndMemoryStats() ([]statsapi.PodStats, error) {
 	fn.mut.Lock()
 	defer fn.mut.Unlock()
 	var podStats []statsapi.PodStats
-	for _, pod := range fn.Pods {
+	for _, pod := range fn.Informer.List() {
+		if pod.Status.Phase != v1.PodRunning {
+			continue
+		}
 		var stats []statsapi.ContainerStats
 		allc := uint64(0)
 		allm := uint64(0)
@@ -125,7 +163,7 @@ func (fn *FakeNode) GetCgroupCPUAndMemoryStats(cgroupName string, updateStats bo
 
 	allc := uint64(0)
 	allm := uint64(0)
-	for _, pod := range fn.Pods {
+	for _, pod := range fn.Informer.List() {
 		for _, container := range pod.Spec.Containers {
 			cpu, mem := containerMetrics(pod, container)
 			allc += cpu
@@ -309,7 +347,7 @@ func (fn *FakeNode) ListBlockVolumesForPod(podUID types.UID) (map[string]volume.
 // GetPods returns the specs of all the pods running on this node.
 func (fn *FakeNode) GetPods() []*v1.Pod {
 	var pods []*v1.Pod
-	for _, pod := range fn.Pods {
+	for _, pod := range fn.Informer.List() {
 		pods = append(pods, pod)
 	}
 	return pods

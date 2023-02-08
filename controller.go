@@ -3,7 +3,7 @@ package fake_kubelet
 import (
 	"context"
 	"fmt"
-
+	"github.com/wzshiming/fake-kubelet/informer"
 	"github.com/wzshiming/fake-kubelet/metrics/collectors"
 	"github.com/wzshiming/fake-kubelet/metrics/stats"
 	"net"
@@ -108,15 +108,15 @@ func NewController(conf Config, app string, group string) (*Controller, error) {
 		nodeLabelSelector = selector.String()
 	}
 
-	var lockPodsOnNodeFunc func(ctx context.Context, nodeName string) error
+	var lockPodsOnNodeFunc func(ctx context.Context, inf *informer.PodsInf) error
 
 	nodes, err := NewNodeController(NodeControllerConfig{
 		ClientSet:         conf.ClientSet,
 		NodeIP:            conf.NodeIP,
 		NodeSelectorFunc:  nodeSelectorFunc,
 		NodeLabelSelector: nodeLabelSelector,
-		LockPodsOnNodeFunc: func(nodeName string) error {
-			return lockPodsOnNodeFunc(context.Background(), nodeName)
+		LockPodsOnNodeFunc: func(inf *informer.PodsInf) error {
+			return lockPodsOnNodeFunc(context.Background(), inf)
 		},
 		GetDaemonPortFunc: func(nodeName string) string {
 			node := providers.Get(nodeName)
@@ -150,7 +150,7 @@ func NewController(conf Config, app string, group string) (*Controller, error) {
 		NodeHasFunc:                       nodes.Has, // just handle pods that are on nodes we have
 		Logger:                            conf.Logger,
 		FuncMap:                           funcMap,
-	}, providers)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pods controller: %v", err)
 	}
@@ -191,12 +191,9 @@ func (c *Controller) Start(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) CreateNode(ctx context.Context, nodeName string, port int) error {
-	provider := NewFakeNode(nodeName, port)
+func (c *Controller) CreateNode(ctx context.Context, nodeName string, port int, client kubernetes.Interface) error {
+	provider := NewFakeNode(nodeName, port, client)
 	c.providers.Put(nodeName, provider)
-
-	go c.Metrics(ctx, provider, port)
-
 	return c.nodes.CreateNode(ctx, nodeName)
 }
 
@@ -215,6 +212,8 @@ func (c *Controller) Metrics(ctx context.Context, statsProvider stats.Provider, 
 			case "/metrics/resource":
 				handler := compbasemetrics.HandlerFor(resourceRegistry, compbasemetrics.HandlerOpts{ErrorHandling: compbasemetrics.ContinueOnError})
 				handler.ServeHTTP(rw, r)
+			case "/dump":
+				statsProvider.GetPods()
 			default:
 				http.NotFound(rw, r)
 			}

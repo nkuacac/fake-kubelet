@@ -145,6 +145,8 @@ func main() {
 
 	if takeOverAll {
 		logger.Printf("Watch all nodes")
+	} else if groupName != "" {
+		logger.Printf("Watch nodes with labels %q", "group="+groupName)
 	} else if takeOverLabelsSelector != "" {
 		logger.Printf("Watch nodes with labels %q", takeOverLabelsSelector)
 	}
@@ -205,7 +207,7 @@ func main() {
 				if groupName != "" {
 					name = groupName + "-" + s
 				}
-				err = controller.CreateNode(ctx, name, port)
+				err = controller.CreateNode(ctx, name, port, clientset)
 				if err != nil {
 					logger.Printf("Failed create node %q: %v", name, err)
 					return false
